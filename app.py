@@ -1,114 +1,118 @@
+import asyncio
+import aiosqlite
+import httpx
 import pennylane as qml
 import numpy as np
-from kivy.lang import Builder
-from kivymd.app import MDApp
-from kivymd.uix.screen import MDScreen
-from kivymd.uix.button import MDRaisedButton
-from kivymd.uix.label import MDLabel
+from kivy.app import App
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.label import Label
+from kivy.uix.button import Button
 from kivy.clock import Clock
-from concurrent.futures import ThreadPoolExecutor
-import speedtest
-import httpx
-import asyncio
-import subprocess
+import random
+import json
 
-# Initialize the quantum device
-dev = qml.device('default.qubit', wires=4)
+# Load configuration settings
+with open('config.json', 'r') as config_file:
+    config = json.load(config_file)
 
-# Define the quantum circuit to include jitter
+# Initialize the quantum device from config
+dev = qml.device(config["quantum_device"], wires=config["quantum_wires"])
+
 @qml.qnode(dev)
 def quantum_circuit(download_speed, upload_speed, ping, jitter):
-    # Normalize the metrics for simplicity, including jitter
-    r, g, b, j = download_speed / 100, upload_speed / 100, 1 - ping / 1000, jitter / 10
+    normalization_factors = config["normalization_factors"]
+    r = download_speed / normalization_factors['download_speed']
+    g = upload_speed / normalization_factors['upload_speed']
+    b = 1 - ping / normalization_factors['ping']
+    j = jitter / normalization_factors['jitter']
+    
     qml.RY(np.pi * r, wires=0)
     qml.RY(np.pi * g, wires=1)
     qml.RY(np.pi * b, wires=2)
-    qml.RY(np.pi * j, wires=3)  # Apply rotation for jitter
+    qml.RY(np.pi * j, wires=3)
     qml.CNOT(wires=[0, 1])
     qml.CNOT(wires=[1, 2])
     qml.CNOT(wires=[2, 3])
     return qml.probs(wires=[0, 1, 2, 3])
 
-# Function to perform the network test, measure jitter, and run the quantum circuit
-def perform_network_test():
-    st = speedtest.Speedtest()
-    st.download()
-    st.upload()
-    ping = st.results.ping
+async def create_db():
+    async with aiosqlite.connect(config["database_path"]) as db:
+        await db.execute('''CREATE TABLE IF NOT EXISTS network_tests (
+                             id INTEGER PRIMARY KEY,
+                             download_speed REAL,
+                             upload_speed REAL,
+                             ping REAL,
+                             jitter REAL,
+                             quantum_result TEXT)''')
+        await db.commit()
 
-    try:
-        # Measure jitter using ping command
-        process = subprocess.Popen(["ping", "-c", "10", "google.com"], stdout=subprocess.PIPE)
-        output, _ = process.communicate()
-        jitter = parse_jitter_from_ping_output(output)
+async def insert_network_test(download_speed, upload_speed, ping, jitter, quantum_result):
+    async with aiosqlite.connect(config["database_path"]) as db:
+        await db.execute('''INSERT INTO network_tests (download_speed, upload_speed, ping, jitter, quantum_result)
+                             VALUES (?, ?, ?, ?, ?)''',
+                         (download_speed, upload_speed, ping, jitter, str(quantum_result)))
+        await db.commit()
 
-        # Run the quantum circuit
-        quantum_result = quantum_circuit(st.results.download / 1e6, st.results.upload / 1e6, ping, jitter)
-        
-    except subprocess.CalledProcessError as e:
-        print("Error measuring jitter:", e)
-        jitter = None  # Set jitter to None if measurement fails
-        quantum_result = None  # Set quantum result to None if an error occurs
+async def fetch_all_tests():
+    async with aiosqlite.connect(config["database_path"]) as db:
+        async with db.execute("SELECT * FROM network_tests") as cursor:
+            return await cursor.fetchall()
 
-    return st.results.download / 1e6, st.results.upload / 1e6, ping, jitter, quantum_result
+async def analyze_network_performance_with_gpt4():
+    tests = await fetch_all_tests()
+    if not tests:
+        return "No data available for analysis."
 
-# Function to parse jitter from ping output (adjust for your system's output format)
-def parse_jitter_from_ping_output(output):
-    lines = output.decode().splitlines()
-    for line in lines:
-        if "mdev" in line:
-            jitter_str = line.split("=")[1].strip()  # Example parsing
-            jitter = float(jitter_str)  # Convert to float
-            return jitter
+    formatted_data = "\n".join([f"Test {test[0]}: Download {test[1]} Mbps, Upload {test[2]} Mbps, Ping {test[3]} ms, Jitter {test[4]} ms, Quantum Result: {test[5]}" for test in tests])
+    prompt = f"Given the following network test results over time, analyze the network's performance and identify any potential issues:\n{formatted_data}"
 
-    return None  # Return None if jitter info not found
-
-# Async function to call GPT-4 for sentiment analysis, considering jitter and quantum result
-async def analyze_sentiment(network_data, quantum_result):
-    prompt = f"Network quality data: Download speed {network_data[0]:.2f} Mbps, Upload speed {network_data[1]:.2f} Mbps, Ping {network_data[2]} ms, Jitter {network_data[3]:.2f} ms. Quantum probabilities: {quantum_result}. Analyze the overall network sentiment."
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            "https://api.openai.com/v1/engines/text-davinci-003/completions",
-            headers={"Authorization": f"Bearer YOUR_OPENAI_API_KEY"},
-            json={"prompt": prompt, "max_tokens": 60}
+            "https://api.openai.com/v1/completions",
+            headers={"Authorization": f"Bearer {config['openai_api_key']}"},
+            json={"model": "text-davinci-003", "prompt": prompt, "max_tokens": 1024}
         )
         result = response.json()
-        return result['choices'][0]['text'] if response.status_code == 200 else "Error in sentiment analysis"
+        return result['choices'][0]['text'] if response.status_code == 200 else "Error in analysis."
 
-class NetworkQualityApp(MDApp):
+class MyApp(App):
     def build(self):
-        self.screen = MDScreen()
-        
-        self.test_button = MDRaisedButton(
-            text="Test Network Quality",
-            pos_hint={"center_x": 0.5, "center_y": 0.5},
-            on_release=self.on_test_network
-        )
-        
-        self.result_label = MDLabel(
-            text="Press the button to test network quality",
-            halign="center",
-            pos_hint={"center_x": 0.5, "center_y": 0.4}
-        )
-        
-        self.screen.add_widget(self.test_button)
-        self.screen.add_widget(self.result_label)
-        
-        return self.screen
+        layout = BoxLayout(orientation='vertical')
+        self.label = Label(text='Network Quality Analyzer')
+        self.button = Button(text='Run Network Test')
+        self.analysis_button = Button(text='Analyze Network Performance')
+        self.result_label = Label(text='Analysis results will appear here.')
 
-    def on_test_network(self, instance):
-        executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(perform_network_test)
-        future.add_done_callback(lambda x: asyncio.run(self.perform_sentiment_analysis(x.result())))
+        self.button.bind(on_press=lambda instance: self.run_network_test())
+        self.analysis_button.bind(on_press=lambda instance: self.analyze_network_performance())
 
-    async def perform_sentiment_analysis(self, network_data):
-        sentiment_result = await analyze_sentiment(network_data, network_data[-1])
-        Clock.schedule_once(lambda dt: self.update_ui_with_sentiment(sentiment_result, network_data))
+        layout.add_widget(self.label)
+        layout.add_widget(self.button)
+        layout.add_widget(self.analysis_button)
+        layout.add_widget(self.result_label)
 
-    def update_ui_with_sentiment(self, sentiment_result, network_data):
-        # Update to display sentiment and network data including jitter and quantum result
-        self.result_label.text = f"Network sentiment: {sentiment_result}\nDownload: {network_data[0]:.2f} Mbps\nUpload: {network_data[1]:.2f} Mbps\nPing: {network_data[2]} ms\nJitter: {network_data[3]:.2f} ms\nQuantum Result: {network_data[-1]}"
+        return layout
+
+    def run_network_test(self):
+        download_speed = random.uniform(50, 150)  # Simulated values
+        upload_speed = random.uniform(10, 50)
+        ping = random.uniform(5, 20)
+        jitter = random.uniform(1, 5)
+        quantum_result = quantum_circuit(download_speed, upload_speed, ping, jitter)
         
+        asyncio.ensure_future(insert_network_test(download_speed, upload_speed, ping, jitter, quantum_result))
+        self.label.text = f'Last test: Download {download_speed:.2f}, Upload {upload_speed:.2f}, Ping {ping:.2f}, Jitter {jitter:.2f}\nQuantum Result: {quantum_result}'
 
-if __name__ == "__main__":
-    NetworkQualityApp().run()
+    def analyze_network_performance(self):
+        async def perform_analysis():
+            analysis_result = await analyze_network_performance_with_gpt4()
+            Clock.schedule_once(lambda dt: self.update_analysis_label(analysis_result), 0)
+
+        asyncio.ensure_future(perform_analysis())
+
+    def update_analysis_label(self, analysis_result):
+        self.result_label.text = analysis_result
+
+if __name__ == '__main__':
+    asyncio.run(create_db())
+    MyApp().run()
