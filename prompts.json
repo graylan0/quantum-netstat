@@ -1,0 +1,7 @@
+{
+  "initial_analysis": "Analyze the current network performance with the following metrics: Download Speed: {download_speed} Mbps, Upload Speed: {upload_speed} Mbps, Ping: {ping} ms, Jitter: {jitter} ms. Identify any immediate optimizations that can be applied, considering peak usage times, potential bottlenecks, and historical performance trends.",
+  "adaptive_circuit_config": "Based on the historical network performance data provided below, suggest modifications to our quantum circuit parameters to enhance analysis accuracy. Historical Data: {historical_data}. Highlight any detected temporal patterns or anomalies.",
+  "predictive_analysis": "Using the quantum analysis results provided: {quantum_results}, predict future network performance issues. Identify potential downtimes, bottlenecks, or service disruptions, considering historical trends and recurring patterns in network performance.",
+  "malware_detection": "Inspect the network traffic encoded in the quantum state: {quantum_state}. Use this data to detect anomalies or patterns indicating malware presence, focusing on traffic flow variations, unusual signal patterns, and known malware signatures.",
+  "bandwidth_consumption": "Identify devices consuming excessive bandwidth from the network traffic data encoded in the quantum state: {quantum_state}. Recommend strategies for optimization or restriction to maintain optimal network performance."
+}
